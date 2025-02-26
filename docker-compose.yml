@@ -1,0 +1,53 @@
+version: '3.8'
+
+networks:
+  app-network:  
+    name: stt_save_docker_app-network
+    driver: bridge
+
+services:
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    environment:
+      - FAST_REFRESH=false
+      - VITE_DEV_SERVER_HOST=0.0.0.0
+    networks:
+      - app-network
+    depends_on:
+      - fastapi
+
+  fastapi:
+    container_name: modest_khayyam  # ตั้งชื่อ Container
+    build: ./fastapi
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./fastapi:/app
+    environment:
+      - WHISPER_SERVICE_URL=http://whisper:9000
+    networks:
+      - app-network
+    depends_on:
+      - whisper
+
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    ports:
+      - "9000:9000"
+    environment:
+      - ASR_MODEL=base
+      - ASR_ENGINE=openai_whisper
+      - CUDA_VISIBLE_DEVICES=-1  # บังคับให้ใช้ CPU
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    networks:
+      - app-network

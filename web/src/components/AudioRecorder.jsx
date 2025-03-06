@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Globe, Volume2, AlertCircle } from 'lucide-react';
+import { Mic, Globe, Volume2, AlertCircle, Save, Download } from 'lucide-react';
 
 const AudioRecorder = () => {
   const [isRecording, setIsRecording] = useState(false);
@@ -12,6 +12,8 @@ const AudioRecorder = () => {
   const [whisperReconnectAttempts, setWhisperReconnectAttempts] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [savingStatus, setSavingStatus] = useState(''); // สถานะการบันทึกไฟล์
+  const [sessionId, setSessionId] = useState(''); // ID สำหรับการบันทึกแต่ละครั้ง
   
   // ภาษาที่รองรับ
   const [sourceLanguages, setSourceLanguages] = useState([
@@ -53,6 +55,9 @@ const AudioRecorder = () => {
   const whisperStatusInterval = useRef(null);
 
   useEffect(() => {
+    // สร้าง session ID สำหรับบันทึก
+    generateSessionId();
+    
     // เริ่มการเชื่อมต่อ WebSocket และตรวจสอบความสามารถต่างๆ
     initializeWebSocket();
     fetchSupportedLanguages();
@@ -72,6 +77,14 @@ const AudioRecorder = () => {
       updateLanguageSettings();
     }
   }, [sourceLanguage, targetLanguage, isConnected]);
+  
+  const generateSessionId = () => {
+    // สร้าง ID พร้อมวันที่และเวลาปัจจุบัน
+    const now = new Date();
+    const dateString = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const timeString = now.toTimeString().slice(0, 8).replace(/:/g, '-'); // HH-MM-SS
+    setSessionId(`transcription_${dateString}_${timeString}`);
+  };
   
   const cleanupAudioAnalyser = () => {
     if (audioLevelInterval.current) {
@@ -604,9 +617,130 @@ const AudioRecorder = () => {
   const handleTargetLanguageChange = (e) => {
     setTargetLanguage(e.target.value);
   };
+  
+  // ฟังก์ชันสำหรับบันทึกการถอดความเป็นไฟล์ txt
+  const saveTranscription = () => {
+    if (!transcription) {
+      setError('ไม่มีข้อความที่จะบันทึก');
+      return;
+    }
+    
+    try {
+      // สร้างชื่อไฟล์ด้วยภาษาและวันที่เวลา
+      const sourceLangName = sourceLanguages.find(l => l.code === sourceLanguage)?.name || sourceLanguage;
+      const fileName = `${sessionId}_${sourceLangName}.txt`;
+      
+      // สร้าง blob จากข้อความ
+      const blob = new Blob([transcription], {type: 'text/plain;charset=utf-8'});
+      
+      // สร้าง URL และลิงก์ดาวน์โหลด
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      
+      // คลิกลิงก์เพื่อดาวน์โหลด
+      document.body.appendChild(link);
+      link.click();
+      
+      // ล้าง URL และลิงก์
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 100);
+      
+      setSavingStatus('บันทึกการถอดความเรียบร้อยแล้ว');
+      setTimeout(() => setSavingStatus(''), 3000);
+    } catch (error) {
+      console.error('Error saving transcription:', error);
+      setError(`ไม่สามารถบันทึกไฟล์ได้: ${error?.message || 'Unknown error'}`);
+    }
+  };
+  
+  // ฟังก์ชันสำหรับบันทึกการแปลเป็นไฟล์ txt
+  const saveTranslation = () => {
+    if (!translation) {
+      setError('ไม่มีคำแปลที่จะบันทึก');
+      return;
+    }
+    
+    try {
+      // สร้างชื่อไฟล์ด้วยภาษาและวันที่เวลา
+      const targetLangName = targetLanguages.find(l => l.code === targetLanguage)?.name || targetLanguage;
+      const fileName = `${sessionId}_${targetLangName}.txt`;
+      
+      // สร้าง blob จากข้อความ
+      const blob = new Blob([translation], {type: 'text/plain;charset=utf-8'});
+      
+      // สร้าง URL และลิงก์ดาวน์โหลด
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      
+      // คลิกลิงก์เพื่อดาวน์โหลด
+      document.body.appendChild(link);
+      link.click();
+      
+      // ล้าง URL และลิงก์
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 100);
+      
+      setSavingStatus('บันทึกคำแปลเรียบร้อยแล้ว');
+      setTimeout(() => setSavingStatus(''), 3000);
+    } catch (error) {
+      console.error('Error saving translation:', error);
+      setError(`ไม่สามารถบันทึกไฟล์ได้: ${error?.message || 'Unknown error'}`);
+    }
+  };
+  
+  // ฟังก์ชันสำหรับบันทึกทั้งการถอดความและการแปลพร้อมกัน
+  const saveBoth = () => {
+    if (!transcription && !translation) {
+      setError('ไม่มีข้อมูลที่จะบันทึก');
+      return;
+    }
+    
+    try {
+      // สร้างชื่อไฟล์
+      const sourceLangName = sourceLanguages.find(l => l.code === sourceLanguage)?.name || sourceLanguage;
+      const targetLangName = targetLanguages.find(l => l.code === targetLanguage)?.name || targetLanguage;
+      const fileName = `${sessionId}_${sourceLangName}-${targetLangName}.txt`;
+      
+      // สร้างเนื้อหาที่จะบันทึก
+      const content = `== ข้อความต้นฉบับ (${sourceLangName}) ==\n${transcription || 'ไม่มีข้อความ'}\n\n== คำแปล (${targetLangName}) ==\n${translation || 'ไม่มีคำแปล'}`;
+      
+      // สร้าง blob จากข้อความ
+      const blob = new Blob([content], {type: 'text/plain;charset=utf-8'});
+      
+      // สร้าง URL และลิงก์ดาวน์โหลด
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      
+      // คลิกลิงก์เพื่อดาวน์โหลด
+      document.body.appendChild(link);
+      link.click();
+      
+      // ล้าง URL และลิงก์
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 100);
+      
+      setSavingStatus('บันทึกข้อมูลเรียบร้อยแล้ว');
+      setTimeout(() => setSavingStatus(''), 3000);
+    } catch (error) {
+      console.error('Error saving data:', error);
+      setError(`ไม่สามารถบันทึกไฟล์ได้: ${error?.message || 'Unknown error'}`);
+    }
+  };
 
   return (
-    <div className="max-w-2xl mx-auto p-6">
+    <div className="max-w-4xl mx-auto p-6">
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-2xl font-bold">บันทึกเสียงและแปลภาษา</h1>
         <div className="flex items-center">
@@ -622,6 +756,13 @@ const AudioRecorder = () => {
       {error && (
         <div className="bg-red-50 border-l-4 border-red-500 p-4 mb-6">
           <div className="text-red-700">{error}</div>
+        </div>
+      )}
+      
+      {/* สถานะการบันทึกไฟล์ */}
+      {savingStatus && (
+        <div className="bg-green-50 border-l-4 border-green-500 p-4 mb-6">
+          <div className="text-green-700">{savingStatus}</div>
         </div>
       )}
 
@@ -733,30 +874,70 @@ const AudioRecorder = () => {
           <h2 className="font-semibold">
             ข้อความต้นฉบับ ({sourceLanguages.find(l => l.code === sourceLanguage)?.name || sourceLanguage})
           </h2>
-          <button 
-            onClick={clearText}
-            className="text-sm text-blue-500 hover:text-blue-700"
-          >
-            ล้างข้อความ
-          </button>
-        </div>
-        <div className="p-4 bg-white rounded-lg border border-gray-200 min-h-[100px]">
-          <div className={transcription ? 'text-gray-900' : 'text-gray-400'}>
-            {transcription || 'ข้อความที่ถอดความจะแสดงที่นี่...'}
+          <div className="flex space-x-2">
+            <button
+              onClick={saveTranscription}
+              className="flex items-center text-sm px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 disabled:opacity-50"
+              disabled={!transcription}
+            >
+              <Save className="w-3 h-3 mr-1" />
+              <span>บันทึก</span>
+            </button>
+            <button 
+              onClick={clearText}
+              className="text-sm text-blue-500 hover:text-blue-700"
+            >
+              ล้างข้อความ
+            </button>
           </div>
+        </div>
+        <div className="p-4 bg-white rounded-lg border border-gray-200 min-h-[300px] max-h-[500px] overflow-y-auto">
+          <textarea 
+            className="w-full h-full min-h-[280px] border-none resize-none focus:outline-none focus:ring-0"
+            value={transcription || ''}
+            placeholder="ข้อความที่ถอดความจะแสดงที่นี่..."
+            readOnly
+          />
         </div>
       </div>
       
       {/* Target language translation */}
       <div className="mt-6">
-        <h2 className="font-semibold mb-2">
-          คำแปล ({targetLanguages.find(l => l.code === targetLanguage)?.name || targetLanguage})
-        </h2>
-        <div className="p-4 bg-white rounded-lg border border-gray-200 min-h-[100px]">
-          <div className={translation ? (translation.includes('⚠️') ? 'text-red-500' : 'text-gray-900') : 'text-gray-400'}>
-            {translation || 'คำแปลจะแสดงที่นี่...'}
-          </div>
+        <div className="flex justify-between items-center mb-2">
+          <h2 className="font-semibold">
+            คำแปล ({targetLanguages.find(l => l.code === targetLanguage)?.name || targetLanguage})
+          </h2>
+          <button
+            onClick={saveTranslation}
+            className="flex items-center text-sm px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 disabled:opacity-50"
+            disabled={!translation}
+          >
+            <Save className="w-3 h-3 mr-1" />
+            <span>บันทึก</span>
+          </button>
         </div>
+        <div className="p-4 bg-white rounded-lg border border-gray-200 min-h-[300px] max-h-[500px] overflow-y-auto">
+          <textarea 
+            className={`w-full h-full min-h-[280px] border-none resize-none focus:outline-none focus:ring-0 ${
+              translation && translation.includes('⚠️') ? 'text-red-500' : 'text-gray-900'
+            }`}
+            value={translation || ''}
+            placeholder="คำแปลจะแสดงที่นี่..."
+            readOnly
+          />
+        </div>
+      </div>
+      
+      {/* ปุ่มบันทึกไฟล์ทั้งหมด */}
+      <div className="mt-6 flex justify-center">
+        <button
+          onClick={saveBoth}
+          className="flex items-center text-sm px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+          disabled={!transcription && !translation}
+        >
+          <Download className="w-4 h-4 mr-2" />
+          <span>บันทึกทั้งหมด</span>
+        </button>
       </div>
     </div>
   );

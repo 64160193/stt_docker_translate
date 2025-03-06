@@ -1,7 +1,7 @@
 version: '3.8'
 
 networks:
-  app-network:  
+  app-network:
     name: stt_save_docker_app-network
     driver: bridge
 
@@ -22,7 +22,7 @@ services:
       - fastapi
 
   fastapi:
-    container_name: modest_khayyam  # ตั้งชื่อ Container
+    container_name: modest_khayyam
     build: ./fastapi
     ports:
       - "8000:8000"
@@ -30,24 +30,35 @@ services:
       - ./fastapi:/app
     environment:
       - WHISPER_SERVICE_URL=http://whisper:9000
+      - TRANSLATION_SERVICE=libre
+      - LIBRETRANSLATE_URL=http://libretranslate:5000/translate
     networks:
       - app-network
     depends_on:
       - whisper
+      - libretranslate
 
   whisper:
     image: onerahmet/openai-whisper-asr-webservice:latest
     ports:
       - "9000:9000"
     environment:
-      - ASR_MODEL=base
+      - ASR_MODEL=medium
       - ASR_ENGINE=openai_whisper
-      - CUDA_VISIBLE_DEVICES=-1  # บังคับให้ใช้ CPU
+      - CUDA_VISIBLE_DEVICES=-1
     deploy:
       resources:
         limits:
           memory: 4G
         reservations:
           memory: 1G
+    networks:
+      - app-network
+
+  libretranslate:
+    image: libretranslate/libretranslate
+    ports:
+      - "5000:5000"
+    command: --load-only th,en,zh,ja,ko,fr,de,es,it,ru
     networks:
       - app-network

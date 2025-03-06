@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 from typing import Dict, Optional, Union
 from starlette.websockets import WebSocketState
 import json
+import html
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.DEBUG)
@@ -27,15 +28,18 @@ app.add_middleware(
 # ตั้งค่า Whisper และ Translation
 WHISPER_URL = os.getenv("WHISPER_SERVICE_URL", "http://localhost:9000")
 WHISPER_ASR_ENDPOINT = os.getenv("WHISPER_ASR_ENDPOINT", "/asr")
-WHISPER_TRANSLATE_ENDPOINT = os.getenv("WHISPER_TRANSLATE_ENDPOINT", "/asr")  # ใช้ endpoint เดียวกันแต่เปลี่ยน task
 
-# บังคับใช้เฉพาะ Whisper เท่านั้น
-WHISPER_SUPPORTS_TRANSLATION = True
-USE_WHISPER_TRANSLATION = True
+# ตั้งค่า Translation Service
+# ใช้ LibreTranslate ซึ่งเป็น open-source และฟรี หรือสามารถเลือก Google Translate, DeepL ได้
+TRANSLATION_SERVICE = os.getenv("TRANSLATION_SERVICE", "libre")  # libre, google, deepl
+LIBRETRANSLATE_URL = os.getenv("LIBRETRANSLATE_URL", "https://libretranslate.com/translate")
+LIBRETRANSLATE_API_KEY = os.getenv("LIBRETRANSLATE_API_KEY", "")  # ถ้าต้องการใช้ LibreTranslate API
+
+GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "")  # สำหรับ Google Translate
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "")  # สำหรับ DeepL
 
 # เก็บ active connections
 active_connections: Dict[str, WebSocket] = {}
-ping_tasks: Dict[str, asyncio.Task] = {}
 
 async def process_audio(audio_data, source_lang="th") -> Optional[requests.Response]:
     """ฟังก์ชันสำหรับส่งข้อมูลเสียงไปยัง Whisper API (เฉพาะถอดเสียง)"""
@@ -88,73 +92,124 @@ async def process_audio(audio_data, source_lang="th") -> Optional[requests.Respo
         logger.error(f"Unexpected error in process_audio: {str(e)}")
         return None
 
-async def process_audio_with_translation(audio_data, source_lang="th", target_lang="en") -> Optional[dict]:
-    """ฟังก์ชันสำหรับส่งข้อมูลเสียงไปยัง Whisper API เพื่อแปลภาษา"""
+async def translate_text(text: str, source_lang: str, target_lang: str) -> Optional[str]:
+    """ฟังก์ชันสำหรับแปลข้อความโดยใช้บริการแปลภาษาต่างๆ"""
     try:
-        files = {
-            'audio_file': ('audio.webm', audio_data, 'audio/webm')
-        }
-        url = urljoin(WHISPER_URL, WHISPER_TRANSLATE_ENDPOINT)
-        
-        logger.info(f"Sending request to Whisper for translation: {url}")
-        logger.info(f"Audio data size: {len(audio_data)} bytes")
-        logger.info(f"Source language: {source_lang}, Target language: {target_lang}")
-        
-        params = {
-            "task": "translate",  
-            "language": source_lang,
-            "output": "json"
-        }
-        
-        if target_lang != "en":
-            params["target_language"] = target_lang
-        
-        response = await asyncio.to_thread(
-            requests.post,
-            url,
-            files=files,
-            params=params,
-            timeout=30
-        )
-        
-        logger.debug(f"Whisper response status: {response.status_code}")
-        logger.debug(f"Whisper response content: {response.text}")
-        
-        if response.status_code == 200:
-            translation_result = response.json()
-            translated_text = translation_result.get("text", "").strip()
+        if not text or text.strip() == "":
+            logger.warning("Empty text for translation")
+            return ""
             
-            original_text = translation_result.get("original_text", "")
+        logger.info(f"Translating text from {source_lang} to {target_lang}")
+        logger.info(f"Text to translate: {text[:50]}...")
+        
+        # ถ้าภาษาต้นทางและปลายทางเหมือนกัน ไม่ต้องแปล
+        if source_lang == target_lang:
+            return text
             
-            # ถ้าไม่มีข้อความต้นฉบับ ให้ถอดเสียงอีกครั้ง
-            if not original_text:
-                logger.info("No original text in translation response, transcribing separately")
-                transcription_response = await process_audio(audio_data, source_lang)
-                
-                if transcription_response and transcription_response.status_code == 200:
-                    transcription_result = transcription_response.json()
-                    original_text = transcription_result.get("text", "").strip()
-                    logger.info(f"Successfully transcribed original text: {original_text[:30]}...")
-            
-            return {
-                "original_text": original_text,
-                "translated_text": translated_text,
-                "source_lang": source_lang,
-                "target_lang": target_lang
+        # LibreTranslate (Free and Open Source)
+        if TRANSLATION_SERVICE == "libre":
+            payload = {
+                "q": text,
+                "source": source_lang,
+                "target": target_lang,
+                "format": "text"
             }
+            
+            if LIBRETRANSLATE_API_KEY:
+                payload["api_key"] = LIBRETRANSLATE_API_KEY
+                
+            response = await asyncio.to_thread(
+                requests.post,
+                LIBRETRANSLATE_URL,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("translatedText", "")
+            else:
+                logger.error(f"LibreTranslate API error: {response.status_code}, {response.text}")
+                return None
+        
+        # Google Translate
+        elif TRANSLATION_SERVICE == "google":
+            if not GOOGLE_TRANSLATE_API_KEY:
+                logger.error("Google Translate API key is not set")
+                return None
+                
+            url = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_TRANSLATE_API_KEY}"
+            payload = {
+                "q": text,
+                "source": source_lang,
+                "target": target_lang,
+                "format": "text"
+            }
+            
+            response = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                translations = result.get("data", {}).get("translations", [])
+                if translations:
+                    return html.unescape(translations[0].get("translatedText", ""))
+                else:
+                    return None
+            else:
+                logger.error(f"Google Translate API error: {response.status_code}, {response.text}")
+                return None
+        
+        # DeepL
+        elif TRANSLATION_SERVICE == "deepl":
+            if not DEEPL_API_KEY:
+                logger.error("DeepL API key is not set")
+                return None
+                
+            url = "https://api-free.deepl.com/v2/translate"  # ใช้ API ฟรีของ DeepL
+            headers = {
+                "Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"
+            }
+            payload = {
+                "text": [text],
+                "source_lang": source_lang.upper(),
+                "target_lang": target_lang.upper()
+            }
+            
+            response = await asyncio.to_thread(
+                requests.post,
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                translations = result.get("translations", [])
+                if translations:
+                    return translations[0].get("text", "")
+                else:
+                    return None
+            else:
+                logger.error(f"DeepL API error: {response.status_code}, {response.text}")
+                return None
+                
+        # ใช้บริการแปลภาษาอื่นๆ เพิ่มเติมได้
         else:
-            logger.error(f"Whisper API error: {response.status_code}")
+            logger.error(f"Unsupported translation service: {TRANSLATION_SERVICE}")
             return None
             
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error: {str(e)}")
-        return None
     except Exception as e:
-        logger.error(f"Unexpected error in process_audio_with_translation: {str(e)}")
+        logger.error(f"Error in translate_text: {str(e)}")
         return None
 
 async def process_audio_and_translate(audio_data, source_lang="th", target_lang="en") -> Optional[dict]:
-    """ฟังก์ชันรวมสำหรับถอดเสียงและแปลภาษา โดยใช้เฉพาะ Whisper"""
+    """ฟังก์ชันรวมสำหรับถอดเสียงและแปลภาษา"""
     try:
         # ถอดเสียงเป็นข้อความในภาษาต้นทาง
         logger.info(f"Transcribing audio in source language: {source_lang}")
@@ -174,7 +229,7 @@ async def process_audio_and_translate(audio_data, source_lang="th", target_lang=
                     "target_lang": target_lang
                 }
         else:
-            error_msg = "ไม่สามารถเชื่อมต่อกับ Whisper service" if not transcription_response else f"Whisper error: {transcription_response.status_code}"
+            error_msg = "ไม่สามารถเชื่อมต่อกับระบบเเปลภาษาได้กรุณารอสักครู่" if not transcription_response else f"Whisper error: {transcription_response.status_code}"
             logger.error(error_msg)
             return {
                 "error": error_msg,
@@ -182,12 +237,19 @@ async def process_audio_and_translate(audio_data, source_lang="th", target_lang=
                 "target_lang": target_lang
             }
         
-        # ใช้ Whisper แปลภาษา
-        logger.info(f"Translating from {source_lang} to {target_lang} using Whisper")
-        translation_result = await process_audio_with_translation(audio_data, source_lang, target_lang)
+        # กรณีภาษาต้นทางและปลายทางเหมือนกัน ไม่ต้องแปล
+        if source_lang == target_lang:
+            return {
+                "original_text": original_text,
+                "translated_text": original_text,
+                "source_lang": source_lang,
+                "target_lang": target_lang
+            }
+            
+        # แปลข้อความโดยใช้ Translation Service
+        translated_text = await translate_text(original_text, source_lang, target_lang)
         
-        if translation_result and translation_result.get("translated_text"):
-            translated_text = translation_result.get("translated_text")
+        if translated_text:
             logger.info(f"Successfully translated: {translated_text[:50]}...")
             
             return {
@@ -197,11 +259,10 @@ async def process_audio_and_translate(audio_data, source_lang="th", target_lang=
                 "target_lang": target_lang
             }
         else:
-            # กรณี Whisper แปลไม่สำเร็จ
-            logger.warning("Whisper translation failed")
+            logger.warning("Translation failed")
             return {
                 "original_text": original_text,
-                "translated_text": "การแปลด้วย Whisper ล้มเหลว",
+                "translated_text": "การแปลล้มเหลว",
                 "source_lang": source_lang,
                 "target_lang": target_lang
             }
@@ -316,6 +377,8 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
     except Exception as e:
         logger.error(f"WebSocket connection error: {str(e)}")
+        if client_id in active_connections:
+            del active_connections[client_id]
         
 @app.get("/health")
 async def health_check():
@@ -328,10 +391,20 @@ async def health_check():
     except:
         whisper_status = "down"
 
+    # ทดสอบการเชื่อมต่อกับ Translation service
+    translation_status = "up"
+    try:
+        if TRANSLATION_SERVICE == "libre":
+            test_response = requests.get(LIBRETRANSLATE_URL.replace("/translate", "/languages"), timeout=5)
+            translation_status = "up" if test_response.status_code == 200 else "down"
+    except:
+        translation_status = "down"
+
     return {
         "status": "healthy",
         "whisper_service": whisper_status,
-        "whisper_translation_enabled": True
+        "translation_service": TRANSLATION_SERVICE,
+        "translation_status": translation_status
     }
 
 @app.get("/")
@@ -340,37 +413,39 @@ def read_root():
     return {
         "status": "running",
         "whisper_url": WHISPER_URL,
-        "whisper_translation_enabled": True
+        "translation_service": TRANSLATION_SERVICE
     }
 
 @app.get("/supported-languages")
 def get_supported_languages():
     """Return supported languages for both source and target"""
+    # สามารถเพิ่มภาษาที่รองรับได้ตามต้องการ
+    languages = [
+        {"code": "th", "name": "Thai"},
+        {"code": "en", "name": "English"},
+        {"code": "zh", "name": "Chinese"},
+        {"code": "ja", "name": "Japanese"},
+        {"code": "ko", "name": "Korean"},
+        {"code": "fr", "name": "French"},
+        {"code": "de", "name": "German"},
+        {"code": "es", "name": "Spanish"},
+        {"code": "it", "name": "Italian"},
+        {"code": "ru", "name": "Russian"},
+        {"code": "vi", "name": "Vietnamese"},
+        {"code": "id", "name": "Indonesian"},
+        {"code": "ms", "name": "Malay"},
+        {"code": "ar", "name": "Arabic"},
+        {"code": "pt", "name": "Portuguese"},
+        {"code": "nl", "name": "Dutch"},
+        {"code": "pl", "name": "Polish"},
+        {"code": "tr", "name": "Turkish"},
+        {"code": "cs", "name": "Czech"},
+        {"code": "sv", "name": "Swedish"}
+    ]
+    
     return {
-        "source_languages": [
-            {"code": "th", "name": "Thai"},
-            {"code": "en", "name": "English"},
-            {"code": "zh", "name": "Chinese"},
-            {"code": "ja", "name": "Japanese"},
-            {"code": "ko", "name": "Korean"},
-            {"code": "fr", "name": "French"},
-            {"code": "de", "name": "German"},
-            {"code": "es", "name": "Spanish"},
-            {"code": "it", "name": "Italian"},
-            {"code": "ru", "name": "Russian"}
-        ],
-        "target_languages": [
-            {"code": "th", "name": "Thai"},
-            {"code": "en", "name": "English"},
-            {"code": "zh", "name": "Chinese"},
-            {"code": "ja", "name": "Japanese"},
-            {"code": "ko", "name": "Korean"},
-            {"code": "fr", "name": "French"},
-            {"code": "de", "name": "German"},
-            {"code": "es", "name": "Spanish"},
-            {"code": "it", "name": "Italian"},
-            {"code": "ru", "name": "Russian"}
-        ]
+        "source_languages": languages,
+        "target_languages": languages
     }
 
 @app.post("/transcribe")
@@ -403,40 +478,72 @@ async def transcribe_audio(
         logger.error(f"Error in transcribe_audio: {str(e)}")
         return {"error": f"เกิดข้อผิดพลาด: {str(e)}"}
 
-# เพิ่มฟังก์ชันตรวจสอบ Whisper capabilities
-@app.get("/whisper-capabilities")
-async def whisper_capabilities():
-    """ตรวจสอบความสามารถของ Whisper API"""
+@app.get("/translation-services")
+def get_translation_services():
+    """ข้อมูลเกี่ยวกับบริการแปลภาษาที่รองรับ"""
+    return {
+        "current_service": TRANSLATION_SERVICE,
+        "supported_services": ["libre", "google", "deepl"],
+        "notes": {
+            "libre": "บริการแปลภาษาโอเพนซอร์ส ฟรี แต่อาจมีข้อจำกัดในการใช้งาน",
+            "google": "Google Translate API ต้องการ API key และมีค่าใช้จ่าย",
+            "deepl": "DeepL API มีทั้งแบบฟรีและแบบเสียเงิน ให้ผลลัพธ์ที่แม่นยำสูง"
+        }
+    }
+
+@app.post("/text-translate")
+async def text_translate(
+    text: str,
+    source_lang: str = "th",
+    target_lang: str = "en"
+):
+    """API สำหรับแปลข้อความโดยตรง"""
     try:
-        # ทดสอบว่า Whisper API รองรับการถอดเสียงและแปลภาษาหรือไม่
-        test_audio_path = os.getenv("TEST_AUDIO_PATH", "./test_audio.webm")
+        translated_text = await translate_text(text, source_lang, target_lang)
         
-        if os.path.exists(test_audio_path):
-            with open(test_audio_path, "rb") as f:
-                test_audio = f.read()
-                
-            # ทดสอบถอดเสียง
-            transcribe_response = await process_audio(test_audio, "en")
-            can_transcribe = transcribe_response is not None and transcribe_response.status_code == 200
-            
-            # ทดสอบแปลภาษา
-            translate_result = await process_audio_with_translation(test_audio, "en", "th")
-            can_translate = translate_result is not None and "translated_text" in translate_result
-            
+        if translated_text:
             return {
-                "whisper_url": WHISPER_URL,
-                "can_transcribe": can_transcribe,
-                "can_translate": can_translate,
-                "supports_translation": True,
-                "use_whisper_translation": True
+                "original_text": text,
+                "translated_text": translated_text,
+                "source_lang": source_lang,
+                "target_lang": target_lang
             }
         else:
-            return {
-                "error": f"Test audio file not found: {test_audio_path}",
-                "whisper_url": WHISPER_URL,
-                "supports_translation": True,
-                "use_whisper_translation": True
-            }
+            return {"error": "ไม่สามารถแปลข้อความได้"}
+            
+    except Exception as e:
+        logger.error(f"Error in text_translate: {str(e)}")
+        return {"error": f"เกิดข้อผิดพลาด: {str(e)}"}
+    
+@app.get("/whisper-capabilities")
+async def get_whisper_capabilities():
+    """ตรวจสอบความสามารถของ Whisper service ที่มีอยู่จริง"""
+    try:
+        # ตรวจสอบการเชื่อมต่อกับ Whisper
+        health_url = urljoin(WHISPER_URL, "/openapi.json")
+        health_response = await asyncio.to_thread(
+            requests.get,
+            health_url,
+            timeout=5
+        )
+        
+        whisper_available = health_response.status_code == 200
+        
+        return {
+            "use_whisper_translation": True,
+            "supports_translation": True,
+            "can_transcribe": whisper_available,
+            "can_translate": whisper_available,
+            "whisper_status": "ready" if whisper_available else "unavailable",
+            "error": None if whisper_available else "Cannot connect to Whisper service"
+        }
     except Exception as e:
         logger.error(f"Error checking Whisper capabilities: {str(e)}")
-        return {"error": f"เกิดข้อผิดพลาดในการตรวจสอบความสามารถของ Whisper: {str(e)}"}
+        return {
+            "use_whisper_translation": True,
+            "supports_translation": True,
+            "can_transcribe": False,
+            "can_translate": False,
+            "whisper_status": "error",
+            "error": str(e)
+        }

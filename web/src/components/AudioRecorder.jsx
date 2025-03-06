@@ -9,6 +9,7 @@ const AudioRecorder = () => {
   const [transcription, setTranscription] = useState('');
   const [translation, setTranslation] = useState('');
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [whisperReconnectAttempts, setWhisperReconnectAttempts] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   
@@ -36,9 +37,12 @@ const AudioRecorder = () => {
   const [isSettingLanguage, setIsSettingLanguage] = useState(false);
   
   // ข้อมูลสถานะการแปลด้วย Whisper
-  const [whispperInfo, setWhisperInfo] = useState({
+  const [whisperInfo, setWhisperInfo] = useState({
     usingWhisperTranslation: true,
-    supportsTranslation: true
+    supportsTranslation: true,
+    canTranscribe: false,
+    canTranslate: false,
+    isReady: false
   });
 
   const ws = useRef(null);
@@ -46,8 +50,10 @@ const AudioRecorder = () => {
   const audioContext = useRef(null);
   const analyser = useRef(null);
   const audioLevelInterval = useRef(null);
+  const whisperStatusInterval = useRef(null);
 
   useEffect(() => {
+    // เริ่มการเชื่อมต่อ WebSocket และตรวจสอบความสามารถต่างๆ
     initializeWebSocket();
     fetchSupportedLanguages();
     checkWhisperCapabilities();
@@ -55,8 +61,17 @@ const AudioRecorder = () => {
     return () => {
       cleanupWebSocket();
       cleanupAudioAnalyser();
+      stopWhisperStatusPolling();
     };
   }, []);
+
+  // เพิ่ม useEffect เพื่อตรวจสอบการเปลี่ยนค่าภาษาและบันทึกอัตโนมัติ
+  useEffect(() => {
+    // เมื่อมีการเชื่อมต่อแล้ว และมีการเปลี่ยนภาษา ให้บันทึกอัตโนมัติ
+    if (isConnected && !isSettingLanguage && !isRecording) {
+      updateLanguageSettings();
+    }
+  }, [sourceLanguage, targetLanguage, isConnected]);
   
   const cleanupAudioAnalyser = () => {
     if (audioLevelInterval.current) {
@@ -71,6 +86,31 @@ const AudioRecorder = () => {
     }
   };
   
+  // หยุดการตรวจสอบสถานะ Whisper
+  const stopWhisperStatusPolling = () => {
+    if (whisperStatusInterval.current) {
+      clearInterval(whisperStatusInterval.current);
+      whisperStatusInterval.current = null;
+    }
+  };
+  
+  // เริ่มการตรวจสอบสถานะ Whisper เป็นระยะ
+  const startWhisperStatusPolling = () => {
+    // ยกเลิก interval เดิมถ้ามี
+    stopWhisperStatusPolling();
+    
+    // ตั้งค่า interval ใหม่
+    whisperStatusInterval.current = setInterval(() => {
+      console.log('Checking Whisper status...');
+      checkWhisperCapabilities().then(whisperReady => {
+        if (whisperReady) {
+          console.log('Whisper is now ready!');
+          stopWhisperStatusPolling(); // หยุดการตรวจสอบเมื่อ Whisper พร้อมใช้งาน
+        }
+      });
+    }, 10000); // ตรวจสอบทุก 10 วินาที
+  };
+  
   // ดึงข้อมูลความสามารถของ Whisper
   const checkWhisperCapabilities = async () => {
     try {
@@ -78,18 +118,65 @@ const AudioRecorder = () => {
       
       if (response.ok) {
         const data = await response.json();
+        
+        // อัปเดตข้อมูล Whisper
+        const isWhisperReady = data.can_transcribe && data.can_translate;
+        
         setWhisperInfo({
-          usingWhisperTranslation: data.use_whisper_translation,
-          supportsTranslation: data.supports_translation,
-          canTranscribe: data.can_transcribe,
-          canTranslate: data.can_translate
+          usingWhisperTranslation: data.use_whisper_translation || false,
+          supportsTranslation: data.supports_translation || false,
+          canTranscribe: data.can_transcribe || false,
+          canTranslate: data.can_translate || false,
+          isReady: isWhisperReady
         });
+        
         console.log('Whisper capabilities:', data);
+        
+        if (isWhisperReady) {
+          setWhisperReconnectAttempts(0); // รีเซ็ตตัวนับเมื่อ Whisper พร้อมใช้งาน
+          setIsConnected(true);
+          setConnectionStatus('เชื่อมต่อแล้ว');
+          setError('');
+        } else {
+          handleWhisperReconnect();
+        }
+        
+        return isWhisperReady;
       } else {
         console.error('Failed to fetch Whisper capabilities');
+        // เปลี่ยนสถานะการเชื่อมต่อเป็นผิดพลาด
+        setIsConnected(false);
+        setConnectionStatus('ไม่สามารถเชื่อมต่อกับระบบเเปลภาษาได้กรุณารอสักครู่');
+        setError('ไม่สามารถเชื่อมต่อกับระบบแปลภาษา');
+        
+        handleWhisperReconnect();
+        return false;
       }
     } catch (error) {
       console.error('Error checking Whisper capabilities:', error);
+      // เปลี่ยนสถานะการเชื่อมต่อเป็นผิดพลาด
+      setIsConnected(false);
+      setConnectionStatus('ไม่สามารถเชื่อมต่อกับระบบเเปลภาษาได้กรุณารอสักครู่');
+      setError('ไม่สามารถเชื่อมต่อกับระบบแปลภาษา');
+      
+      handleWhisperReconnect();
+      return false;
+    }
+  };
+  
+  // จัดการการเชื่อมต่อใหม่สำหรับ Whisper
+  const handleWhisperReconnect = () => {
+    if (whisperReconnectAttempts < 5) {
+      setWhisperReconnectAttempts(prev => prev + 1);
+      setConnectionStatus(`ไม่สามารถเชื่อมต่อกับระบบแปลภาษา - กำลังลองใหม่ (${whisperReconnectAttempts + 1}/5)`);
+      
+      // เริ่มการตรวจสอบเป็นระยะ ถ้ายังไม่ได้ทำ
+      if (!whisperStatusInterval.current) {
+        startWhisperStatusPolling();
+      }
+    } else {
+      setConnectionStatus('ไม่สามารถเชื่อมต่อกับระบบแปลภาษา - เกินจำนวนครั้งที่ลองใหม่');
+      stopWhisperStatusPolling();
     }
   };
   
@@ -108,15 +195,24 @@ const AudioRecorder = () => {
         }
       } else {
         console.error('Failed to fetch supported languages');
+        // เปลี่ยนสถานะการเชื่อมต่อเป็นผิดพลาด
+        setConnectionStatus('ไม่สามารถดึงข้อมูลภาษาที่รองรับ');
+        setError('ไม่สามารถดึงข้อมูลภาษาที่รองรับจากระบบ');
       }
     } catch (error) {
       console.error('Error fetching supported languages:', error);
+      // เปลี่ยนสถานะการเชื่อมต่อเป็นผิดพลาด
+      setConnectionStatus('ไม่สามารถดึงข้อมูลภาษาที่รองรับ');
+      setError('ไม่สามารถดึงข้อมูลภาษาที่รองรับจากระบบ');
     }
   };
 
   const cleanupWebSocket = () => {
     if (ws.current) {
       ws.current.unmounted = true;
+      if (ws.current.readyState === WebSocket.OPEN) {
+        ws.current.close();
+      }
       ws.current = null;
     }
     if (mediaRecorder.current?.state === 'recording') {
@@ -130,6 +226,8 @@ const AudioRecorder = () => {
         setReconnectAttempts(prev => prev + 1);
         initializeWebSocket();
       }, 3000); // รอ 3 วินาทีก่อนลองเชื่อมต่อใหม่
+    } else {
+      setConnectionStatus('ไม่สามารถเชื่อมต่อได้ - เกินจำนวนครั้งที่ลองใหม่');
     }
   };
 
@@ -140,6 +238,10 @@ const AudioRecorder = () => {
       ws.current.removeEventListener('message', null);
       ws.current.removeEventListener('error', null);
       ws.current.removeEventListener('close', null);
+      
+      if (ws.current.readyState === WebSocket.OPEN) {
+        ws.current.close();
+      }
       ws.current = null;
     }
 
@@ -156,7 +258,7 @@ const AudioRecorder = () => {
       const connectionTimeout = setTimeout(() => {
         if (ws.current?.readyState !== WebSocket.OPEN) {
           console.log('Connection timeout - closing socket');
-          ws.current?.close();
+          if (ws.current) ws.current.close();
           setError('การเชื่อมต่อหมดเวลา');
           setConnectionStatus('ไม่สามารถเชื่อมต่อได้ - กรุณาลองใหม่');
           handleReconnect();
@@ -167,13 +269,22 @@ const AudioRecorder = () => {
       ws.current.addEventListener('open', () => {
         console.log('WebSocket Connected! ReadyState:', ws.current?.readyState);
         clearTimeout(connectionTimeout);
-        setIsConnected(true);
-        setConnectionStatus('เชื่อมต่อแล้ว');
-        setError('');
-        setReconnectAttempts(0); // รีเซ็ตตัวนับเมื่อเชื่อมต่อสำเร็จ
         
-        // ส่งการตั้งค่าภาษาเริ่มต้น
-        updateLanguageSettings();
+        // เมื่อเชื่อมต่อ WebSocket สำเร็จ ให้ตรวจสอบสถานะ Whisper
+        checkWhisperCapabilities().then(whisperReady => {
+          if (whisperReady) {
+            setIsConnected(true);
+            setConnectionStatus('เชื่อมต่อแล้ว');
+            setError('');
+            setReconnectAttempts(0); // รีเซ็ตตัวนับเมื่อเชื่อมต่อสำเร็จ
+            
+            // ส่งการตั้งค่าภาษาเริ่มต้น
+            updateLanguageSettings();
+          } else {
+            setConnectionStatus('เชื่อมต่อ WebSocket สำเร็จ แต่รอ Whisper...');
+            // Whisper จะถูกตรวจสอบเป็นระยะโดย interval
+          }
+        });
       });
 
       ws.current.addEventListener('message', handleWebSocketMessage);
@@ -219,6 +330,11 @@ const AudioRecorder = () => {
             const errorMessage = "⚠️ การแปลล้มเหลว กรุณาลองอีกครั้ง";
             return errorMessage;
           });
+        } else if (message.error.includes("Whisper not available")) {
+          // กรณี Whisper ไม่พร้อมใช้งาน
+          setError('ระบบแปลภาษาไม่พร้อมใช้งาน กรุณารอสักครู่');
+          setIsConnected(false);
+          checkWhisperCapabilities(); // ตรวจสอบสถานะ Whisper ใหม่
         } else {
           setError(message.error);
         }
@@ -254,6 +370,23 @@ const AudioRecorder = () => {
         // การตั้งค่าภาษาสำเร็จ
         setIsSettingLanguage(false);
         console.log('Language settings updated successfully');
+      } else if (message.status === "whisper_status") {
+        // อัปเดตสถานะ Whisper จากเซิร์ฟเวอร์ (ถ้ามี)
+        setWhisperInfo(prev => ({
+          ...prev,
+          isReady: message.is_ready || false,
+          canTranscribe: message.can_transcribe || false,
+          canTranslate: message.can_translate || false
+        }));
+        
+        if (message.is_ready) {
+          setIsConnected(true);
+          setConnectionStatus('เชื่อมต่อแล้ว');
+          setError('');
+        } else {
+          setIsConnected(false);
+          setConnectionStatus('รอระบบแปลภาษา...');
+        }
       }
     } catch (error) {
       console.error('Error parsing message:', error);
@@ -265,6 +398,12 @@ const AudioRecorder = () => {
 
   const startRecording = async () => {
     try {
+      // ตรวจสอบว่าระบบพร้อมใช้งานหรือไม่
+      if (!isConnected || !whisperInfo.isReady) {
+        setError('ระบบไม่พร้อมใช้งาน กรุณารอสักครู่');
+        return;
+      }
+      
       console.log('Requesting microphone access...');
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -322,16 +461,21 @@ const AudioRecorder = () => {
             return;
           }
 
+          // ตรวจสอบว่า WebSocket ยังเชื่อมต่ออยู่หรือไม่
+          if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+            setError('การเชื่อมต่อถูกปิด กำลังเชื่อมต่อใหม่...');
+            initializeWebSocket();
+            return;
+          }
+
           // แสดงสถานะกำลังประมวลผล
           setIsProcessing(true);
 
           // ตั้งค่า WebSocket binary type
-          if (ws.current) {
-            ws.current.binaryType = 'arraybuffer';
-            
-            // ส่งข้อมูล
-            ws.current.send(arrayBuffer);
-          }
+          ws.current.binaryType = 'arraybuffer';
+          
+          // ส่งข้อมูล
+          ws.current.send(arrayBuffer);
           
           // เคลียร์ chunks สำหรับการบันทึกครั้งต่อไป
           audioChunks = [];
@@ -348,11 +492,11 @@ const AudioRecorder = () => {
 
       // ลดเวลาในการส่งช่วงเสียงจาก 3 วินาทีเป็น 2 วินาที เพื่อให้ตอบสนองเร็วขึ้น
       const interval = setInterval(() => {
-  if (mediaRecorder.current?.state === 'recording') {
-    mediaRecorder.current.stop();
-    mediaRecorder.current.start();
-  }
-}, 5000);   // ลดลงจาก 3000 เป็น 2000
+        if (mediaRecorder.current?.state === 'recording') {
+          mediaRecorder.current.stop();
+          mediaRecorder.current.start();
+        }
+      }, 5000);   // ทุก 5 วินาที
 
       mediaRecorder.current.interval = interval;
 
@@ -461,11 +605,6 @@ const AudioRecorder = () => {
     setTargetLanguage(e.target.value);
   };
 
-  // ดำเนินการเมื่อกดปุ่มอัพเดตภาษา
-  const handleLanguageUpdateClick = () => {
-    updateLanguageSettings();
-  };
-
   return (
     <div className="max-w-2xl mx-auto p-6">
       <div className="flex justify-between items-center mb-8">
@@ -473,7 +612,7 @@ const AudioRecorder = () => {
         <div className="flex items-center">
           <div
             className={`w-2 h-2 rounded-full mr-2 ${
-              isConnected ? 'bg-green-500' : 'bg-gray-300'
+              isConnected ? 'bg-green-500' : 'bg-red-500'
             }`}
           />
           <span className="text-sm text-gray-600">{connectionStatus}</span>
@@ -487,11 +626,15 @@ const AudioRecorder = () => {
       )}
 
       {/* Translation Method Info */}
-      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg mb-6 text-sm text-blue-800 flex items-start">
+      <div className={`p-3 border rounded-lg mb-6 text-sm flex items-start ${isConnected ? 'bg-blue-50 border-blue-200 text-blue-800' : 'bg-gray-50 border-gray-200 text-gray-800'}`}>
         <AlertCircle className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" />
         <div>
-          <p className="font-medium">ระบบการแปลภาษา: {whispperInfo.usingWhisperTranslation ? 'Whisper Translation' : 'External Translation API'}</p>
-          <p>Whisper จะ{whispperInfo.usingWhisperTranslation ? '' : 'ไม่'}ถอดเสียงและแปลภาษาในขั้นตอนเดียวกัน</p>
+          <p className="font-medium">ระบบการแปลภาษา: {isConnected ? (whisperInfo.usingWhisperTranslation ? 'Whisper Translation' : 'External Translation API') : 'ไม่สามารถเชื่อมต่อได้'}</p>
+          {isConnected ? (
+            <p>Whisper จะ{whisperInfo.usingWhisperTranslation ? '' : 'ไม่'}ถอดเสียงและแปลภาษาในขั้นตอนเดียวกัน {whisperInfo.isReady ? '(พร้อมใช้งาน)' : '(ยังไม่พร้อมใช้งาน)'}</p>
+          ) : (
+            <p>กรุณาตรวจสอบการเชื่อมต่อกับบริการ Whisper</p>
+          )}
         </div>
       </div>
 
@@ -500,9 +643,12 @@ const AudioRecorder = () => {
         <div className="flex items-center mb-3">
           <Globe className="w-5 h-5 mr-2 text-gray-600" />
           <h2 className="font-semibold">ตั้งค่าภาษา</h2>
+          {isSettingLanguage && (
+            <span className="ml-2 text-xs text-blue-600">กำลังบันทึกการตั้งค่า...</span>
+          )}
         </div>
         
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               ภาษาต้นทาง (ที่พูด)
@@ -539,18 +685,6 @@ const AudioRecorder = () => {
             </select>
           </div>
         </div>
-        
-        <button
-          onClick={handleLanguageUpdateClick}
-          className={`w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-            isSettingLanguage 
-              ? 'bg-gray-400 cursor-not-allowed' 
-              : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500'
-          }`}
-          disabled={isSettingLanguage || isRecording}
-        >
-          {isSettingLanguage ? 'กำลังบันทึกการตั้งค่า...' : 'บันทึกการตั้งค่าภาษา'}
-        </button>
       </div>
 
       {/* Recording Button and Audio Level */}
@@ -575,13 +709,14 @@ const AudioRecorder = () => {
           onClick={isRecording ? stopRecording : startRecording}
           className={`p-6 rounded-full transition-colors ${
             isRecording ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'
-          }`}
-          disabled={!isConnected || isSettingLanguage}
+          } ${(!isConnected || !whisperInfo.isReady) ? 'opacity-50 cursor-not-allowed' : ''}`}
+          disabled={!isConnected || !whisperInfo.isReady || isSettingLanguage}
         >
           <Mic className="w-8 h-8 text-white" />
         </button>
         <div className="mt-4 text-gray-600">
           {isRecording ? 'กำลังบันทึก...' : 'กดเพื่อเริ่มบันทึก'}
+          {(!isConnected || !whisperInfo.isReady) && ' (ระบบยังไม่พร้อม)'}
         </div>
       </div>
 
